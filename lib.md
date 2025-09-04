@@ -855,3 +855,277 @@ At the very bottom of the file, you see `test` blocks. These are built-in checks
 ### Conclusion
 
 This `lib.zig` file is the heart of the server. It uses a series of structs to manage the server's state and an asynchronous, event-driven model with callbacks to handle many connections efficiently without getting stuck waiting for any single one. It's like a well-run restaurant where the staff doesn't stand around waiting, but instead responds instantly when a bell rings, signaling that their attention is needed.
+
+
+好的，我们来扮演老师和学生，一起深入研究这个 `lib.zig` 文件。这个文件是整个 Web 框架的心脏，所有的核心逻辑都在这里。
+
+---
+
+### 各位同学，欢迎来到引擎室：`lib.zig` 文件详解
+
+昨天我们学习了 `build.zig`，那是我们项目的“菜谱”。今天，我们要走进真正的“厨房”或者说“引擎室”——`lib.zig` 文件。
+
+这个文件主要有两个职责：
+
+1.  **定义核心的 `Server`（服务器）以及它如何处理网络连接。** 这是最关键的运行逻辑。
+2.  **充当整个库的“大门”或“前台”。** 它把其他文件（如 `request.zig`, `response.zig`）中最重要的部分集中起来，方便使用这个库的程序员调用。
+
+我们从头开始看。
+
+---
+
+### 第一部分：库的“前台大厅”（导入与重导出）
+
+```zig
+//! libxev-http: High-performance async HTTP framework for Zig
+//! ... (这些是文档注释)
+
+const std = @import("std");
+const xev = @import("xev");
+// ... 其他导入
+
+// Version information
+pub const version = "1.0.0";
+// ...
+
+// Re-export commonly used types (重导出常用类型)
+pub const Allocator = std.mem.Allocator;
+// ...
+
+// Re-export core modules (重导出核心模块)
+pub const HttpRequest = @import("request.zig").HttpRequest;
+pub const HttpResponse = @import("response.zig").HttpResponse;
+// ... (后面还有很多类似的行)
+```
+
+在文件的开头，你会看到一大片 `pub const ...`。这是一个在 Zig 中非常友好且重要的设计模式，我们称之为 **“重导出”（Re-exporting）**。
+
+想象一下我们的库是一个有多层多部门的大公司（比如 `request.zig` 是“收发室”，`response.zig` 是“外联部”）。
+
+我们不希望一个访客（也就是使用我们库的程序员）为了找不同的工具而跑遍所有部门。所以，我们在这个 `lib.zig` 文件里建立了一个 **“中央前台”**。
+
+这些 `pub const` 行就像是前台的指示牌：
+*   “想找 `HttpRequest` 吗？你不用去 `request.zig` 文件里找，直接从我这里（`lib.zig`）拿就行。”
+*   “需要 `Router` 吗？给你，在这里。”
+
+这样做让我们的库对使用者来说非常干净、方便。用户只需要 `@import` 这一个 `lib.zig` 文件，就能获得所有最核心的工具。
+
+---
+
+### 第二部分：核心组件（Struct 结构体）
+
+现在我们来看看驱动服务器运转的核心机械。这里有三个关键的结构体，我们可以用一个**繁忙的餐厅**来比喻它们。
+
+#### 1. `ClientConnection`：服务员
+
+```zig
+const ClientConnection = struct {
+    tcp: xev.TCP,
+    server: *Server,
+    allocator: Allocator,
+    buffer: [8192]u8,
+    // ... 其他字段
+};
+```
+
+这个结构体代表**一个连接到服务器的独立客户端**。你可以把它想象成一个**被指派到特定餐桌的“服务员”**。
+
+*   `tcp: xev.TCP`: 这是与顾客的**直接电话线**（TCP 连接）。
+*   `server: *Server`: 指向“餐厅经理”，这样服务员才知道为谁工作。
+*   `allocator: Allocator`: 服务员的“经费”，用来记录点单、准备账单等需要内存的操作。
+*   `buffer`: 服务员的**点餐本**，用来记录顾客说的每一句话（请求数据）。
+*   `timing`: 一个秒表，确保顾客不会点一个菜点半天（这可以防止慢速攻击）。
+
+#### 2. `ConnectionPool`：餐厅领位员
+
+```zig
+const ConnectionPool = struct {
+    active_connections: std.atomic.Value(u32),
+    max_connections: u32,
+};
+```
+
+这个结构体的唯一工作就是**确保餐厅不会人满为患**。它就像是站在门口的**“领位员”**。
+
+*   `max_connections`: 餐厅的消防规定人数上限。
+*   `active_connections`: 当前在餐厅里的客人数量。它是一个 `atomic`（原子）类型，确保即使很多服务员同时更新这个数字，它也总是准确的。
+*   `tryAcquire()`: 相当于问领位员：“还有空桌吗？” 如果有，返回 `true`；如果满了，返回 `false`。
+*   `release()`: 服务员告诉领位员：“我这桌客人走了！”
+
+#### 3. `Server`：餐厅经理
+
+```zig
+pub const Server = struct {
+    // ...
+    router: *Router,
+    connection_pool: ConnectionPool,
+    // ...
+};
+```
+这是总指挥——**“餐厅经理”**。它把所有部分组织在一起。
+
+*   `router`: 餐厅的**菜单**。它知道每个请求该如何处理（例如，顾客点 `/users`，菜单知道该找哪个厨师）。
+*   `connection_pool`: 经理和门口领位员的联系方式。
+*   `listen()`: 这是最重要的方法。它相当于经理大喊一声：**“开门营业！”**，然后整个餐厅就开始运作了。
+
+---
+
+### 第三部分：异步的魔法（回调函数与 xev）
+
+这是最核心、也最需要理解的部分。我们的服务器是**异步的（asynchronous）**，或者叫**事件驱动的（event-driven）**。
+
+一个**同步**的餐厅经理会不停地跑到门口喊：“来客人了吗？来客人了吗？” 这非常低效。
+
+我们的**异步**餐厅经理则使用一套**“铃铛系统”**。
+
+1.  经理告诉门口：“有客人来的时候，**摇一下铃铛**。”
+2.  然后经理就去忙别的事了。
+3.  当客人真的来了，铃铛响起，一个特殊的函数——我们称之为**回调函数（Callback）**——就会被自动执行。
+
+这里的 `xev` 库就是为我们提供这套“铃铛系统”的。让我们跟踪一个请求的完整生命周期，并重点关注 `xev` 的调用。
+
+#### `listen()` 函数：开门营业
+
+```zig
+pub fn listen(self: *Server) !void {
+    // ... 省略日志打印 ...
+
+    var loop = try xev.Loop.init(...); // 1. 准备好事件循环（“经理的大脑”）
+    defer loop.deinit();
+
+    var tcp_server = try xev.TCP.init(address); // 2. 准备好TCP服务器（“餐厅大门”）
+    try tcp_server.bind(address);
+    try tcp_server.listen(128); // 3. 开始监听（“把门打开”）
+
+    // ...
+
+    var accept_completion: xev.Completion = .{};
+    tcp_server.accept(&loop, &accept_completion, Server, self, acceptCallback); // 4. 设置铃铛
+
+    try loop.run(.until_done); // 5. 开始工作！（“经理开始听所有铃铛的声音”）
+}
+```
+
+第4步是第一个关键的 `xev` 调用：
+*   `tcp_server.accept(...)`: 这句话的意思是：“嘿，`xev`，请帮我监听 `tcp_server` 这个大门。”
+*   `&loop`: 在哪个事件循环上监听。
+*   `Server, self, acceptCallback`: **这是魔法的核心！** 它告诉 `xev`：“当一个新连接到来时（事件发生时），请调用 `acceptCallback` 这个函数，并把 `self`（也就是 `Server` 经理对象）作为上下文信息（`userdata`）传给它。”
+
+#### `acceptCallback` 函数：客人进门
+
+当一个新连接真的到来时，`xev` 会自动调用这个函数。
+
+```zig
+fn acceptCallback(...) xev.CallbackAction {
+    // ...
+    const client_tcp = result catch { ... }; // 1. 拿到与新客人的“电话线”
+
+    if (!server.connection_pool.tryAcquire()) { // 2. 问领位员是否满座
+        // ... 满了就拒绝
+    }
+
+    // 3. 分配一个“服务员”(ClientConnection)
+    const client_conn = ...;
+    client_conn.* = ClientConnection.init(client_tcp, server, server.allocator);
+
+    // 4. 设置下一个铃铛！
+    client_tcp.read(loop, &client_conn.read_completion, .{ .slice = &client_conn.buffer }, ClientConnection, client_conn, readCallback);
+
+    return .rearm; // 5. 返回 .rearm
+}
+```
+
+第4步是第二个关键的 `xev` 调用：
+*   `client_tcp.read(...)`: 经理对新来的服务员说：“注意听这位客人点餐。当他开始说话（发送数据）时，摇一下铃铛。”
+*   `.slice = &client_conn.buffer`: 把客人说的话（数据）记录到这位服务员的点餐本 (`buffer`) 里。
+*   `ClientConnection, client_conn, readCallback`: 告诉 `xev`：“当数据传来时，请调用 `readCallback` 函数，并把 `client_conn`（这位服务员）作为上下文传给它。”
+
+第5步的 `return .rearm;` 也很重要。它告诉 `xev`：“这次的客人我处理好了，请**重新部署（re-arm）**这个 `accept` 铃铛，我还要继续接待下一位客人。”
+
+#### `readCallback` 函数：客人点餐
+
+当客户端发送数据时，`xev` 会调用这个函数。
+
+```zig
+fn readCallback(...) xev.CallbackAction {
+    // ...
+    const bytes_read = result catch { ... }; // 1. 收到客人说的话（数据）
+
+    if (bytes_read == 0) { // 2. 如果客人挂了电话（连接关闭）
+        client_conn.close(loop); // 就结束服务
+        return .disarm;
+    }
+
+    // 3. 把数据追加到完整的点餐记录(request_buffer)里
+    // ...
+
+    // 4. 检查客人是否说完了完整的一句话（HTTP请求是否完整）
+    if (should_process) {
+        // 5a. 如果说完了，把订单交给厨房处理
+        processHttpRequestFromBuffer(client_conn, loop) catch { ... };
+        return .disarm; // 订单已接收，这个“读”的任务完成了，解除部署
+    } else {
+        // 5b. 如果没说完，设置同一个铃铛，继续听
+        client_conn.tcp.read(loop, &client_conn.read_completion, ...);
+        return .disarm; // 旧的“读”任务完成，但我们马上设了个新的，效果类似重新部署
+    }
+}
+```
+`return .disarm;` 的意思是：“这次的‘读’事件我处理完了，请**解除部署（disarm）**这个铃铛。我不需要你再为**这次**读操作通知我了。” （如果需要继续读，我们会手动设置一个新的 `read` 任务，就像 `5b` 那样）。
+
+#### `processHttpRequestFromBuffer` 函数：厨房处理订单
+
+这个函数不是回调，而是我们自己的逻辑。它解析请求，通过 `router`（菜单）找到对应的处理函数（厨师），生成 `HttpResponse`（菜品），然后调用 `sendResponse` 上菜。
+
+#### `sendResponse` & `writeCallback` 函数：上菜与确认
+
+`sendResponse` 函数里有第三个关键的 `xev` 调用：
+```zig
+fn sendResponse(...) {
+    // ...
+    client_conn.response_data = response_data; // 重要：先把菜端在托盘上，防止被回收
+    client_conn.tcp.write(loop, &client_conn.write_completion, .{ .slice = response_data }, ClientConnection, client_conn, writeCallback);
+}
+```
+*   `client_conn.tcp.write(...)`: “嘿，`xev`，请把这份 `response_data`（菜）发给客人。发送**完成**后，请摇一下铃铛，调用 `writeCallback` 函数。”
+
+当数据发送完毕后，`writeCallback` 被调用：
+```zig
+fn writeCallback(...) xev.CallbackAction {
+    // ...
+    log.info("✅ Sent {} bytes response", .{bytes_written}); // 确认菜已送到
+
+    // 上完菜，服务结束
+    client_conn.close(loop);
+    return .disarm; // “写”任务完成，解除部署
+}
+```
+#### `closeCallback` 函数：客人离席
+
+`writeCallback` 调用 `client_conn.close(loop)`，而 `close` 函数内部会设置最后一个铃铛：
+```zig
+fn close(...) {
+    // ...
+    self.tcp.close(loop, &self.close_completion, ClientConnection, self, closeCallback);
+}
+```
+*   `self.tcp.close(...)`: “嘿 `xev`，请关闭这个连接。当**完全关闭**后，请摇铃，调用 `closeCallback`。”
+
+当连接彻底断开后，`closeCallback` 被调用，它会执行最终的清理工作，比如释放服务员 `client_conn` 占用的所有内存 (`client_conn.deinit()`)。
+
+---
+
+### 总结
+
+这个 `lib.zig` 文件通过几个核心的 `struct` 来管理状态，并利用 `xev` 库提供的**事件循环和回调机制**，构建了一个高效的异步服务器。
+
+整个流程就像一个高度协同的餐厅：
+1.  `listen`：餐厅开门，经理开始关注大门的 `accept` 铃铛。
+2.  `acceptCallback`：客人进门，分配一个服务员，并让服务员关注客人的 `read` 铃铛。
+3.  `readCallback`：客人点餐，服务员记录，点完后把订单送去厨房。
+4.  `processHttpRequest...`：厨房做菜。
+5.  `sendResponse`：服务员上菜，并关注 `write` 铃铛，确认客人收到。
+6.  `writeCallback`：客人收到菜，服务员开始清理桌面（`close`）。
+7.  `closeCallback`：客人离席，服务员和桌子被完全释放，可以服务下一位客人。
+
+整个过程，经理（主线程）从不等待任何一个客人，他只响应各种“铃铛”声，因此可以同时为成千上万的客人提供高效服务。这就是异步编程的威力！
