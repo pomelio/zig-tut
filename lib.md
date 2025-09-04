@@ -1129,3 +1129,155 @@ fn close(...) {
 7.  `closeCallback`：客人离席，服务员和桌子被完全释放，可以服务下一位客人。
 
 整个过程，经理（主线程）从不等待任何一个客人，他只响应各种“铃铛”声，因此可以同时为成千上万的客人提供高效服务。这就是异步编程的威力！
+
+
+cmpxchgWeak 为什么不直接用 fetchAdd ？
+
+这是一个极其深刻和出色的问题！它直接触及了并发编程中算法设计的核心。你问到了点子上。
+
+为什么在 tryAcquire 中不直接用 fetchAdd(1, .acq_rel) 而是用一个看起来更复杂的 cmpxchgWeak 循环呢？
+
+简短的回答是：我们需要在增加计数值之前，先做一个检查（if (current >= self.max_connections)）。fetchAdd 无法将这个检查和增加操作绑定成一个原子步骤。
+
+详细解析：原子操作的“不可分割性”
+
+我们再回顾一下“原子”的定义：不可分割。
+
+fetchAdd(1, ...) 是一个单一的、原子的操作。它的全部职责就是：“把值加1”。它做得非常出色，但也就仅此而已。
+
+我们的 tryAcquire 逻辑需要做两件事：
+
+检查：当前连接数是否小于最大限制？
+
+增加：如果小于，就把连接数加1。
+
+如果我们尝试用 fetchAdd 来实现，代码可能会像这样（这是错误示范！）：
+
+code
+Zig
+download
+content_copy
+expand_less
+
+// 错误示范：无法工作的 tryAcquire
+fn tryAcquire_WRONG(self: *ConnectionPool) bool {
+    // 第一步：先读取当前值
+    const current = self.active_connections.load(.acquire);
+
+    // 第二步：检查
+    if (current >= self.max_connections) {
+        return false;
+    }
+
+    // 第三步：增加
+    // 问题来了！
+    _ = self.active_connections.fetchAdd(1, .acq_rel);
+
+    return true;
+}
+
+这段代码存在一个巨大的竞态条件（Race Condition），我们用一个场景来说明：
+
+假设 max_connections 是 100。
+
+线程A 执行到第一步，读取 current 为 99。
+
+线程B 也执行到第一步，也读取 current 为 99。
+
+线程A 执行第二步，99 < 100，检查通过。
+
+线程B 也执行第二步，99 < 100，检查也通过。
+
+线程A 执行第三步，调用 fetchAdd，active_connections 变成了 100。
+
+线程B 也执行第三步，调用 fetchAdd，active_connections 变成了 101！
+
+灾难发生了！ 我们突破了 max_connections 的限制。服务器的逻辑被破坏了。
+
+问题就出在**“检查”和“增加”这两个步骤不是原子的**。在它们之间存在一个时间窗口，其他线程可以趁虚而入。
+
+cmpxchg 循环的威力：将“检查”与“修改”捆绑
+
+现在，我们再回头看 cmpxchgWeak 循环的实现：
+
+code
+Zig
+download
+content_copy
+expand_less
+IGNORE_WHEN_COPYING_START
+IGNORE_WHEN_COPYING_END
+fn tryAcquire(self: *ConnectionPool) bool {
+    while (true) {
+        // 1. 读取当前值 (我们的“猜测”)
+        const current = self.active_connections.load(.acquire);
+
+        // 2. 基于猜测进行检查
+        if (current >= self.max_connections) {
+            return false;
+        }
+
+        // 3. 尝试原子性地“确认猜测并修改”
+        if (self.active_connections.cmpxchgWeak(current, current + 1, ...) == null) {
+            // 成功！
+            return true;
+        }
+        // 如果失败，循环会立即重试
+    }
+}
+
+这个循环巧妙地解决了问题。cmpxchgWeak 这个操作本身就包含了**“检查（比较）”** 和 “修改（交换）”。
+
+让我们用同样的场景再走一遍流程：
+
+max_connections 是 100。active_connections 当前是 99。
+
+线程A 进入循环：
+
+load 得到 current 是 99。
+
+检查 99 < 100 通过。
+
+尝试 cmpxchgWeak(99, 100, ...)。
+
+就在线程A尝试 cmpxchg 的瞬间，CPU切换到了 线程B。
+
+线程B 进入循环：
+
+load 得到 current 是 99。
+
+检查 99 < 100 通过。
+
+尝试 cmpxchgWeak(99, 100, ...)。假设 线程B 先成功了。
+
+active_connections 的值现在原子性地变成了 100。
+
+线程B的 tryAcquire 返回 true。
+
+CPU切换回 线程A，继续执行它的 cmpxchgWeak(99, 100, ...)。
+
+CPU现在进行比较：“嘿，active_connections 的值还是 99 吗？”
+
+答案是：“不是！它现在是 100 了！”
+
+于是，cmpxchgWeak 失败，不执行任何修改。
+
+线程A 的 if 判断失败，它不会返回 true。它会回到 while 循环的顶部，开始新一轮的尝试。
+
+线程A 的第二轮循环：
+
+load 得到 current 是 100。
+
+检查 100 >= 100，条件成立。
+
+if 语句执行，函数返回 false。
+
+最终结果： 一个线程成功地将计数器加到了 100，另一个线程安全地失败了。连接数从未超过 100。逻辑完美无缺。
+
+总结
+
+cmpxchg（Compare-and-Swap，比较并交换）是实现所谓的**“无锁（Lock-Free）”**算法的基石。这个循环模式被称为 CAS Loop。
+
+当你的逻辑是简单的**“无条件修改”**（比如 release 时无条件减1），那么 fetchAdd / fetchSub 是最佳选择，因为它更简单、意图更明确。
+
+当你需要**“有条件的修改”**（比如 tryAcquire 时，只有在未满的情况下才加1），fetchAdd 就无能为力了，因为你无法把你的“条件”塞进这个原子操作里。这时，CAS Loop 就是标准的、最高效的解决方案。它允许你在普通代码中进行任意复杂的逻辑判断，然后通过一次原子的 cmpxchg 操作来提交你的修改，同时确保在此期间共享状态没有被其他人改变。
