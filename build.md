@@ -350,7 +350,30 @@ const libxev_dep = b.dependency("libxev", .{
 
 *   `const libxev_dep = b.dependency("libxev", ...);`
     Our project, `libxev-http`, needs another library called `libxev` to work. This line tells the Builder, "Hey, go find the 'libxev' ingredient that's listed in our project's manifest (`build.zig.zon`)." We also pass along our `target` and `optimize` settings to make sure this dependency is built in the same way as our own code.
-
+``` build.zig.zon
+///build.zig.zon
+.{
+    .name = .libxev_http,
+    .version = "1.0.0",
+    .fingerprint = 0x1911be84d0143ab6,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/archive/main.tar.gz",
+            .hash = "libxev-0.0.0-86vtcx8dEwDfl6p4tGVxCygft8oOsggfba9JO-k28J2x",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "tests",
+        "README.md",
+        "LICENSE",
+    },
+}
+```
 ---
 
 ### Part 3: Creating a Reusable Component (The Library)
